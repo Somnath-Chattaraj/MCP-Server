@@ -18,5 +18,6 @@ dependencies = [
     "langgraph>=0.1.17",
     "langgraph-supervisor>=0.0.5",
     "langchain-google-genai>=0.1.0",
+    "langchain-google-vertexai = ^0.1.0",
     "langchain-mcp-adapters>=0.1.2"
 ]
