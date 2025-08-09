@@ -188,29 +188,18 @@ async def stock_predictor(
 ) -> str:
     from langchain_mcp_adapters.client import MultiServerMCPClient
     from langchain_google_genai import ChatGoogleGenerativeAI
-    from langgraph.prebuilt import create_react_agent
-    from langchain.chat_models import init_chat_model
-    from langgraph_supervisor import create_supervisor
     from langchain_core.messages import convert_to_messages
     from io import StringIO
     import os
 
     output_buf = StringIO()
 
-    def pretty_print_messages(update, buf, last_message=False):
-        is_subgraph = False
-        if isinstance(update, tuple):
-            ns, update = update
-            if len(ns) == 0:
-                return
-            is_subgraph = True
-        for node_name, node_update in update.items():
-            messages = convert_to_messages(node_update["messages"])
-            if last_message:
-                messages = messages[-1:]
-            for m in messages:
-                buf.write(m.pretty_repr(html=False) + "\n\n")
+    def pretty_print_messages(update, buf):
+        messages = convert_to_messages(update.get("messages", []))
+        for m in messages:
+            buf.write(m.pretty_repr(html=False) + "\n\n")
 
+    # ✅ Single MCP server (bright_data)
     client = MultiServerMCPClient({
         "bright_data": {
             "command": "npx",
@@ -226,65 +215,39 @@ async def stock_predictor(
 
     tools = await client.get_tools()
 
-    # ✅ Using Google Gemini model instead of OpenAI
-    model = init_chat_model(model="gemini-2.0-flash", api_key=os.getenv("GEMINI_API_KEY"))
+    # ✅ Single Gemini model
+    model = ChatGoogleGenerativeAI(
+        model="gemini-2.0-flash",
+        google_api_key=os.getenv("GEMINI_API_KEY"),
+        temperature=0.2
+    )
 
-    stock_finder_agent = create_react_agent(model, tools, prompt="""You are a stock research analyst specializing in the Indian Stock Market (NSE). Your task is to select 2 promising, actively traded NSE-listed stocks for short-term trading (buy/sell) based on recent performance, news buzz, volume, or technical strength.
-    Avoid penny stocks and illiquid companies.
-    Output should include stock names, tickers, and brief reasoning for each choice.
-    Respond in structured plain text format.""", name="stock_finder_agent")
+    # ✅ Combined prompt (stock finder + market data + news + recommendation)
+    combined_prompt = """
+    You are an expert NSE stock analyst.
+    For the user's request, do the following in ONE response:
+    1. Select 2 promising NSE-listed stocks for short-term trading (avoid penny stocks)
+    2. Provide:
+        - Current price
+        - Previous close
+        - Volume
+        - 7-day & 30-day price trend
+        - RSI, 50/200-day moving averages
+    3. Summarize recent (past 3-5 days) relevant news and classify as Positive, Negative, or Neutral.
+    4. Give a clear Buy/Sell/Hold recommendation for each, with target price.
 
-    market_data_agent = create_react_agent(model, tools, prompt="""You are a market data analyst for Indian stocks listed on NSE. Given a list of stock tickers (e.g., RELIANCE, INFY), your task is to gather recent market information for each stock, including:
-    - Current price
-    - Previous closing price
-    - Today's volume
-    - 7-day and 30-day price trend
-    - Basic Technical indicators (RSI, 50/200-day moving averages)
-    - Any notable spikes in volume or volatility
-    
-    Return your findings in a structured and readable format for each stock, suitable for further analysis by a recommendation engine. Use INR as the currency. Be concise but complete.""", 
-    name="market_data_agent")
+    Output in clear sections per stock.
+    Use INR for prices.
+    """
 
-    news_analyst_agent = create_react_agent(model, tools, prompt="""You are a financial news analyst. Given the names or tickers of Indian NSE-listed stocks, your job is to:
-    - Search for the most recent news articles (past 3-5 days)
-    - Summarize key updates, announcements, and events for each stock
-    - Classify each piece of news as positive, negative, or neutral
-    - Highlight how the news might affect short-term stock price
-                                            
-    Present your response in a clear, structured format — one section per stock.
+    # Call Gemini with tools if needed
+    response = await model.ainvoke(
+        [{"role": "user", "content": combined_prompt + "\n\nUser query: " + user_query}],
+        tools=tools
+    )
 
-    Use bullet points where necessary. Keep it short, factual, and analysis-oriented.""", name="news_analyst_agent")
-
-    price_recommender_agent = create_react_agent(model, tools, prompt="""You are a trading strategy advisor for the Indian Stock Market. You are given:
-    - Recent market data (current price, volume, trend, indicators)
-    - News summaries and sentiment for each stock
-        
-    Based on this info, for each stock:
-    1. Recommend an action: Buy, Sell, or Hold
-    2. Suggest a specific target price for entry or exit (INR)
-    3. Briefly explain the reason behind your recommendation.
-        
-    Your goal is to provide practical, near-term trading advice for the next trading day.
-        
-    Keep the response concise and clearly structured.""", name="price_recommender_agent")
-
-    # ✅ Supervisor also uses Gemini
-    supervisor = create_supervisor(
-        model=init_chat_model("gemini-2.0-flash", api_key=os.getenv("GEMINI_API_KEY")),
-        agents=[stock_finder_agent, market_data_agent, news_analyst_agent, price_recommender_agent],
-        prompt=(
-            "You manage four agents for NSE stock prediction: stock_finder_agent, market_data_agent, news_analyst_agent, price_recommender_agent.\n"
-            "Assign tasks sequentially, complete the flow, and return actionable buy/sell recommendations."
-        ),
-        add_handoff_back_messages=True,
-        output_mode="full_history",
-    ).compile()
-
-    for chunk in supervisor.stream({"messages": [{"role": "user", "content": user_query}]}):
-        pretty_print_messages(chunk, output_buf, last_message=True)
-
+    pretty_print_messages({"messages": [response]}, output_buf)
     return output_buf.getvalue().strip()
-
 # --- Run MCP Server ---
 async def main():
     print("🚀 Starting MCP server on http://0.0.0.0:8086")
