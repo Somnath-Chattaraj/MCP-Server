@@ -187,6 +187,7 @@ async def stock_predictor(
     user_query: Annotated[str, Field(description="Stock-related request")]
 ) -> str:
     from langchain_mcp_adapters.client import MultiServerMCPClient
+    from langchain_google_genai import ChatGoogleGenerativeAI
     from langgraph.prebuilt import create_react_agent
     from langchain.chat_models import init_chat_model
     from langgraph_supervisor import create_supervisor
