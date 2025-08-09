@@ -226,7 +226,7 @@ async def stock_predictor(
     tools = await client.get_tools()
 
     # ✅ Using Google Gemini model instead of OpenAI
-    model = init_chat_model(model="google:gemini-pro", api_key=os.getenv("GEMINI_API_KEY"))
+    model = init_chat_model(model="gemini-2.0-flash", api_key=os.getenv("GEMINI_API_KEY"))
 
     stock_finder_agent = create_react_agent(model, tools, prompt="""You are a stock research analyst specializing in the Indian Stock Market (NSE). Your task is to select 2 promising, actively traded NSE-listed stocks for short-term trading (buy/sell) based on recent performance, news buzz, volume, or technical strength.
     Avoid penny stocks and illiquid companies.
@@ -269,7 +269,7 @@ async def stock_predictor(
 
     # ✅ Supervisor also uses Gemini
     supervisor = create_supervisor(
-        model=init_chat_model("google:gemini-pro", api_key=os.getenv("GEMINI_API_KEY")),
+        model=init_chat_model("gemini-2.0-flash", api_key=os.getenv("GEMINI_API_KEY")),
         agents=[stock_finder_agent, market_data_agent, news_analyst_agent, price_recommender_agent],
         prompt=(
             "You manage four agents for NSE stock prediction: stock_finder_agent, market_data_agent, news_analyst_agent, price_recommender_agent.\n"
