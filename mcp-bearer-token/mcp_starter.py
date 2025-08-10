@@ -4,6 +4,9 @@ import base64
 import io
 import random
 import markdownify
+from langchain.schema import SystemMessage, HumanMessage
+import requests
+import pandas as pd
 import httpx
 import readabilipy
 from typing import Annotated
@@ -247,59 +250,102 @@ def extract_last_messages(update):
     return results
 
 
-async def run_stock_agent(query: str):
-    client = MultiServerMCPClient(
+def fetch_stock_news(stock_name, days=5):
+    url = "https://newsapi.org/v2/everything"
+    params = {
+        "q": stock_name,
+        "from": (pd.Timestamp.today() - pd.Timedelta(days=days)).strftime("%Y-%m-%d"),
+        "sortBy": "publishedAt",
+        "apiKey": os.getenv("NEWSAPI_KEY"),
+        "language": "en",
+    }
+    resp = requests.get(url, params=params)
+    if resp.status_code != 200:
+        return []
+    articles = resp.json().get("articles", [])
+    return [
         {
-            "bright_data": {
-                "command": "npx",
-                "args": ["@brightdata/mcp"],
-                "env": {
-                    "API_TOKEN": os.getenv("BRIGHT_DATA_API_TOKEN"),
-                    "WEB_UNLOCKER_ZONE": "web_unlocker1",
-                    "BROWSER_ZONE": "scraping_browser",
-                },
-                "transport": "stdio",
-            },
+            "title": a["title"],
+            "description": a.get("description", ""),
+            "url": a["url"],
+            "publishedAt": a["publishedAt"],
+            "source": a["source"]["name"],
         }
+        for a in articles
+    ]
+
+
+async def run_stock_agent(query: str):
+    import json
+
+    def build_company_extraction_user_prompt(q: str) -> str:
+        hints = (
+            "- If the query is generic (e.g., 'what stock to buy today', 'best stocks', sector-only), return NONE.\n"
+            "- If multiple companies are mentioned, pick the most central one.\n"
+            "- Prefer NSE-listed company names or well-known tickers."
+        )
+        return f"Query: {q}\nInstructions: Identify a single NSE-listed company if present; else return NONE.\n{hints}"
+
+    COMPANY_EXTRACTION_SYSTEM = (
+        "You extract a single NSE-listed company name mentioned in a short user query for Indian stocks. "
+        "If the query is generic, return NONE. "
+        "Respond ONLY with this JSON (no extra text): "
+        '{ "company": "<Company or NONE>", "reason": "<brief reason>" }'
     )
+    try:
+        extraction_messages = [
+            SystemMessage(content=COMPANY_EXTRACTION_SYSTEM),
+            HumanMessage(content=build_company_extraction_user_prompt(query)),
+        ]
 
-    tools = await client.get_tools()
+        response = llm.generate([extraction_messages])
 
+        content = response.generations[0][0].text.strip()
+        data = json.loads(content)
+        resolved = (data.get("company") or "").strip()
+        reason = (data.get("reason") or "").strip()
+
+    except Exception:
+        resolved, reason = "NONE", "Extraction failed; defaulted to general NSE."
+
+    target = resolved if resolved and resolved.upper() != "NONE" else "NSE"
+
+    articles = fetch_stock_news(target, days=5)
+
+    def fmt(a):
+        t = (a.get("title") or "").strip()
+        d = (a.get("description") or "").strip()
+        s = (a.get("source") or "").strip()
+        p = (a.get("publishedAt") or "").strip()
+        return f"- [{p}] {s}: {t} || {d}"
+
+    news_block = "\n".join(fmt(a) for a in articles[:25]) or "No recent news found."
+
+    tools = []
     stock_agent = create_react_agent(
         llm,
         tools,
-        prompt="""
-You are a **single integrated stock research assistant** specializing in the Indian Stock Market (NSE).
-Your task is to handle the **entire workflow** for the given query in ONE go, without asking for follow-up approval.
+        prompt=f"""
+You are a single integrated stock research assistant specializing in the Indian Stock Market (NSE).
+Handle the entire workflow in ONE go, without asking for follow-up approval.
 
-Steps to follow:
-1. **Stock Selection** – Pick 2 promising, actively traded NSE-listed stocks for short-term trading based on recent performance, news buzz, volume, or technical strength.
-   - Avoid penny stocks and illiquid companies.
-   - Output stock names & tickers.
+Use ONLY the provided recent news to infer near-term sentiment (Bullish/Bearish/Neutral).
 
-2. **Market Data** – For each selected stock, gather:
-   - Current price (INR)
-   - Previous close
-   - Today's volume
-   - 7-day and 30-day price trends
-   - RSI, 50-day MA, 200-day MA
-   - Any notable spikes in volume or volatility
+Resolved target from user query: {target}
+Extraction note: {reason}
 
-3. **News Summary** – Search for the most recent news articles (past 3–5 days) about each stock:
-   - Summarize updates, announcements, and events
-   - Classify sentiment: Positive, Negative, or Neutral
-   - Highlight short-term price impact
+Recent News (last ~5 days) for: {target}
+{news_block}
 
-4. **Recommendation** – For each stock:
-   - Action: Buy, Sell, or Hold
-   - Target price (entry/exit) in INR
-   - Brief reason for recommendation
+Tasks:
+- Classify the target's short-term sentiment as Bullish, Bearish, or Neutral based solely on the above news.
+- Keep outputs concise and structured.
 
-Format the final output in **clear structured plain text**:
-STOCK NAME (TICKER)
-- Market Data: ...
-- News: ...
-- Recommendation: ...
+Output format (plain text):
+TARGET: {target}
+SENTIMENT: <Bullish | Bearish | Neutral>
+CONFIDENCE: <0-1>
+REASON: <one short sentence referencing the news themes>
 """,
         name="stock_agent",
     )
