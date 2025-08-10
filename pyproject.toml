@@ -21,7 +21,8 @@ dependencies = [
     "langchain-google-genai>=0.1.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.22.0",
-    "playwright>=1.37.0"
+    "playwright>=1.37.0",
+    "pandas>=2.3.1",
 ]
 
 [tool.playwright]
