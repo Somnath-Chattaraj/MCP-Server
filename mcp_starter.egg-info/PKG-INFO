@@ -18,6 +18,7 @@ Requires-Dist: langchain-openai>=0.3.0
 Requires-Dist: langgraph>=0.1.17
 Requires-Dist: langgraph-supervisor>=0.0.5
 Requires-Dist: langchain-google-genai>=0.1.0
+Requires-Dist: langchain-google-vertexai>=0.1.0
 Requires-Dist: langchain-mcp-adapters>=0.1.2
 Dynamic: license-file
 

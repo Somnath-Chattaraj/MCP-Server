@@ -1,27 +1,41 @@
 import asyncio
-from typing import Annotated
 import os
+import base64
+import io
+import random
+import markdownify
+import httpx
+import readabilipy
+from typing import Annotated
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field, AnyUrl
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.bearer import BearerAuthProvider, RSAKeyPair
 from mcp import ErrorData, McpError
 from mcp.server.auth.provider import AccessToken
 from mcp.types import TextContent, ImageContent, INVALID_PARAMS, INTERNAL_ERROR
-from pydantic import BaseModel, Field, AnyUrl
-from io import StringIO
 
-import markdownify
-import httpx
-import readabilipy
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.prebuilt import create_react_agent
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph_supervisor import create_supervisor
+from langchain_core.messages import convert_to_messages
+
+from PIL import Image
+from bs4 import BeautifulSoup
+
 
 # --- Load environment variables ---
 load_dotenv()
 
 TOKEN = os.environ.get("AUTH_TOKEN")
 MY_NUMBER = os.environ.get("MY_NUMBER")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 assert TOKEN is not None, "Please set AUTH_TOKEN in your .env file"
 assert MY_NUMBER is not None, "Please set MY_NUMBER in your .env file"
+assert GEMINI_API_KEY is not None, "Please set GEMINI_API_KEY in your .env file"
+
 
 # --- Auth Provider ---
 class SimpleBearerAuthProvider(BearerAuthProvider):
@@ -40,23 +54,20 @@ class SimpleBearerAuthProvider(BearerAuthProvider):
             )
         return None
 
+
 # --- Rich Tool Description model ---
 class RichToolDescription(BaseModel):
     description: str
     use_when: str
     side_effects: str | None = None
 
+
 # --- Fetch Utility Class ---
 class Fetch:
     USER_AGENT = "Puch/1.0 (Autonomous)"
 
     @classmethod
-    async def fetch_url(
-        cls,
-        url: str,
-        user_agent: str,
-        force_raw: bool = False,
-    ) -> tuple[str, str]:
+    async def fetch_url(cls, url: str, user_agent: str, force_raw: bool = False) -> tuple[str, str]:
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.get(
@@ -86,7 +97,6 @@ class Fetch:
 
     @staticmethod
     def extract_content_from_html(html: str) -> str:
-        """Extract and convert HTML content to Markdown format."""
         ret = readabilipy.simple_json.simple_json_from_html_string(html, use_readability=True)
         if not ret or not ret.get("content"):
             return "<error>Page failed to be simplified from HTML</error>"
@@ -94,7 +104,7 @@ class Fetch:
         return content
 
     @staticmethod
-    async def google_search_links(query: str, num_results: int = 5) -> list[str]:
+    async def Google_Search_links(query: str, num_results: int = 5) -> list[str]:
         ddg_url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
         links = []
         async with httpx.AsyncClient() as client:
@@ -102,7 +112,6 @@ class Fetch:
             if resp.status_code != 200:
                 return ["<error>Failed to perform search.</error>"]
 
-        from bs4 import BeautifulSoup
         soup = BeautifulSoup(resp.text, "html.parser")
         for a in soup.find_all("a", class_="result__a", href=True):
             href = a["href"]
@@ -113,16 +122,16 @@ class Fetch:
 
         return links or ["<error>No results found.</error>"]
 
+
 # --- MCP Server Setup ---
-mcp = FastMCP(
-    "Job Finder MCP Server",
-    # auth=SimpleBearerAuthProvider(TOKEN),
-)
+mcp = FastMCP("Job Finder & Stock MCP Server")
+
 
 # --- Tool: validate ---
 @mcp.tool
 async def validate() -> str:
     return MY_NUMBER
+
 
 # --- Tool: job_finder ---
 JobFinderDescription = RichToolDescription(
@@ -146,10 +155,11 @@ async def job_finder(
         return f"🔗 **Fetched Job Posting from URL**: {job_url}\n\n---\n{content.strip()}\n---"
 
     if "look for" in user_goal.lower() or "find" in user_goal.lower():
-        links = await Fetch.google_search_links(user_goal)
+        links = await Fetch.Google_Search_links(user_goal)
         return f"🔍 **Search Results for**: _{user_goal}_\n\n" + "\n".join(f"- {link}" for link in links)
 
     raise McpError(ErrorData(code=INVALID_PARAMS, message="Provide job description, job URL, or search query."))
+
 
 # --- Tool: make_img_black_and_white ---
 MAKE_IMG_BLACK_AND_WHITE_DESCRIPTION = RichToolDescription(
@@ -162,8 +172,6 @@ MAKE_IMG_BLACK_AND_WHITE_DESCRIPTION = RichToolDescription(
 async def make_img_black_and_white(
     puch_image_data: Annotated[str, Field(description="Base64-encoded image data")] = None,
 ) -> list[TextContent | ImageContent]:
-    import base64, io
-    from PIL import Image
     try:
         image_bytes = base64.b64decode(puch_image_data)
         image = Image.open(io.BytesIO(image_bytes))
@@ -176,117 +184,75 @@ async def make_img_black_and_white(
     except Exception as e:
         raise McpError(ErrorData(code=INTERNAL_ERROR, message=str(e)))
 
-# --- Tool: stock_predictor (Puch AI) ---
+
+# --- Tool: stock_recommendation ---
 STOCK_PREDICTOR_DESCRIPTION = RichToolDescription(
-    description="NSE stock prediction and recommendation using Puch AI multi-agent workflow.",
-    use_when="Use when the user wants Indian NSE stock recommendations or predictions.",
-    side_effects="Fetches market data, analyzes news, and returns buy/sell suggestions.",
+    description="NSE stock prediction and recommendation using Gemini multi-agent workflow.",
+    use_when="Use when the user wants Indian NSE stock recommendations or predictions based on a news article. Provides risk, trend, and price targets.",
+    side_effects="Fetches market data from the article, analyzes it, and returns a detailed financial report for a specific NSE stock ticker.",
 )
 
-@mcp.tool(description=STOCK_PREDICTOR_DESCRIPTION.model_dump_json())
-async def stock_predictor(
-    user_query: Annotated[str, Field(description="Stock-related request")]
-) -> str:
-    # ✅ Imports
-    from langchain_mcp_adapters.client import MultiServerMCPClient
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    from langgraph.prebuilt import create_react_agent
-    from langgraph_supervisor import create_supervisor
-    from langchain_core.messages import convert_to_messages
+def pretty_print_message(message, indent=False):
+    return message.pretty_repr(html=True)
 
-    output_buf = StringIO()
+def extract_last_messages(update):
+    if isinstance(update, tuple):
+        ns, update = update
+        if len(ns) == 0:
+            return []
+    results = []
+    for _, node_update in update.items():
+        messages = convert_to_messages(node_update["messages"])
+        results.extend([pretty_print_message(m) for m in messages[-1:]])
+    return results
 
-    def pretty_print_messages(update, buf, last_message=False):
-        """Format and print messages from agents."""
-        if isinstance(update, tuple):
-            ns, update = update
-            if len(ns) == 0:
-                return
-        for node_name, node_update in update.items():
-            messages = convert_to_messages(node_update["messages"])
-            if last_message:
-                messages = messages[-1:]
-            for m in messages:
-                buf.write(m.pretty_repr(html=False) + "\n\n")
-
-    # ✅ MCP client setup
-    client = MultiServerMCPClient({
-        "bright_data": {
-            "command": "npx",
-            "args": ["@brightdata/mcp"],
-            "env": {
-                "API_TOKEN": os.getenv("BRIGHT_DATA_API_TOKEN"),
-                "WEB_UNLOCKER_ZONE": os.getenv("WEB_UNLOCKER_ZONE", "unblocker"),
-                "BROWSER_ZONE": os.getenv("BROWSER_ZONE", "scraping_browser")
+async def run_stock_agent(query: str):
+    client = MultiServerMCPClient(
+        {
+            "bright_data": {
+                "command": "npx",
+                "args": ["@brightdata/mcp"],
+                "env": {
+                    "API_TOKEN": os.getenv("BRIGHT_DATA_API_TOKEN"),
+                    "WEB_UNLOCKER_ZONE": os.getenv("WEB_UNLOCKER_ZONE", "unblocker"),
+                    "BROWSER_ZONE": os.getenv("BROWSER_ZONE", "scraping_browser")
+                },
+                "transport": "stdio",
             },
-            "transport": "stdio",
-        },
-    })
+        }
+    )
 
     tools = await client.get_tools()
 
-    # ✅ Gemini model with timeout & smaller output size
-    def gemini_model():
-        return ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash",
-            google_api_key=os.getenv("GEMINI_API_KEY"),
-            max_output_tokens=400,  # limit response size
-            request_timeout=5        # 5 sec per call
-        )
+    # Use Gemini instead of OpenAI
+    model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GEMINI_API_KEY)
 
-    # ✅ Agents with concise prompts
-    stock_finder_agent = create_react_agent(
-        gemini_model(), tools,
-        prompt="Pick 2 actively traded NSE stocks (no penny stocks) for short-term trading. Give ticker, name, and brief reason.",
-        name="stock_finder_agent"
-    )
+    stock_finder_agent = create_react_agent(model, tools, prompt="""You are a stock research analyst specializing in the Indian Stock Market (NSE)...""", name="stock_finder_agent")
+    market_data_agent = create_react_agent(model, tools, prompt="""You are a market data analyst for Indian stocks listed on NSE...""", name="market_data_agent")
+    news_analyst_agent = create_react_agent(model, tools, prompt="""You are a financial news analyst...""", name="news_analyst_agent")
+    price_recommender_agent = create_react_agent(model, tools, prompt="""You are a trading strategy advisor...""", name="price_recommender_agent")
 
-    market_data_agent = create_react_agent(
-        gemini_model(), tools,
-        prompt="For given NSE tickers, provide: current price, prev close, today's volume, 7d/30d trend, RSI, 50/200 MA, notable volume/volatility spikes.",
-        name="market_data_agent"
-    )
-
-    news_analyst_agent = create_react_agent(
-        gemini_model(), tools,
-        prompt="For NSE tickers, summarize latest 3-5 days news with sentiment (positive/negative/neutral) and short-term price impact.",
-        name="news_analyst_agent"
-    )
-
-    price_recommender_agent = create_react_agent(
-        gemini_model(), tools,
-        prompt="Given market data + news, recommend Buy/Sell/Hold with target price (INR) and 1-line reason.",
-        name="price_recommender_agent"
-    )
-
-    # ✅ Supervisor in parallel mode
     supervisor = create_supervisor(
-        model=gemini_model(),
-        agents=[
-            stock_finder_agent,
-            market_data_agent,
-            news_analyst_agent,
-            price_recommender_agent
-        ],
-        prompt="Coordinate agents to deliver actionable NSE stock recommendations quickly.",
+        model=ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GEMINI_API_KEY),
+        agents=[stock_finder_agent, market_data_agent, news_analyst_agent, price_recommender_agent],
+        prompt="You are a supervisor managing four agents.\nAssign work to one agent at a time.\nDo not do any work yourself.",
         add_handoff_back_messages=True,
         output_mode="full_history",
-        parallel=True
     ).compile()
 
-    # ✅ Run with global 20-second limit
-    async def run_with_timeout():
-        for chunk in supervisor.stream({"messages": [{"role": "user", "content": user_query}]}):
-            pretty_print_messages(chunk, output_buf, last_message=True)
+    responses = []
+    for chunk in supervisor.stream({"messages": [{"role": "user", "content": query}]}):
+        last_msgs = extract_last_messages(chunk)
+        responses.extend(last_msgs)
 
-    try:
-        await asyncio.wait_for(run_with_timeout(), timeout=20)
-    except asyncio.TimeoutError:
-        output_buf.write("\n⚠️ Process timed out after 20 seconds. Partial results shown.\n")
+    return "\n\n".join(responses)
 
-    return output_buf.getvalue().strip()
+@mcp.tool(description=STOCK_PREDICTOR_DESCRIPTION.model_dump_json())
+async def stock_recommendation(query: str) -> str:
+    return await run_stock_agent(query)
 
-# --- Run MCP Server ---
+
+# --- Start MCP Server ---
 async def main():
     print("🚀 Starting MCP server on http://0.0.0.0:8086")
     await mcp.run_async("streamable-http", host="0.0.0.0", port=8086)

@@ -1,23 +1,28 @@
 [project]
-name = "mcp-starter"
+name = "job-stock-mcp-gemini"
 version = "0.1.0"
-description = "Add your description here"
+description = "MCP server with job finder and NSE stock recommendation tools using Google Gemini and local scraping service"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "beautifulsoup4>=4.13.4",
-    "dotenv>=0.9.9",
     "fastmcp>=2.11.2",
+    "python-dotenv>=1.0.1",
+    "httpx>=0.27.0",
     "markdownify>=1.1.0",
-    "pillow>=11.3.0",
-    "python-dotenv>=1.1.1",
-    "readabilipy>=0.3.0",
-    "langchain>=0.3.0",
-    "langchain-core>=0.3.10",
-    "langchain-openai>=0.3.0",
-    "langgraph>=0.1.17",
-    "langgraph-supervisor>=0.0.5",
+    "readabilipy>=0.2.0",
+    "pydantic>=2.7.0",
+    "langchain>=0.2.0",
+    "langchain-core>=0.2.0",
+    "langchain_mcp_adapters>=0.1.0",
+    "langgraph>=0.0.15",
+    "langgraph-supervisor>=0.0.10",
+    "beautifulsoup4>=4.13.0",
+    "Pillow>=11.0.0",
     "langchain-google-genai>=0.1.0",
-    "langchain-google-vertexai >= 0.1.0",
-    "langchain-mcp-adapters>=0.1.2"
+    "fastapi>=0.100.0",
+    "uvicorn>=0.22.0",
+    "playwright>=1.37.0"
 ]
+
+[tool.playwright]
+browsers = ["chromium"]
