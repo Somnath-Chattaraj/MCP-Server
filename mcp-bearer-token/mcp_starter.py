@@ -36,12 +36,20 @@ assert TOKEN is not None, "Please set AUTH_TOKEN in your .env file"
 assert MY_NUMBER is not None, "Please set MY_NUMBER in your .env file"
 assert GEMINI_API_KEY is not None, "Please set GEMINI_API_KEY in your .env file"
 
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.0-flash",
+    temperature=0,
+    google_api_key=GEMINI_API_KEY,
+)
+
 
 # --- Auth Provider ---
 class SimpleBearerAuthProvider(BearerAuthProvider):
     def __init__(self, token: str):
         k = RSAKeyPair.generate()
-        super().__init__(public_key=k.public_key, jwks_uri=None, issuer=None, audience=None)
+        super().__init__(
+            public_key=k.public_key, jwks_uri=None, issuer=None, audience=None
+        )
         self.token = token
 
     async def load_access_token(self, token: str) -> AccessToken | None:
@@ -67,7 +75,9 @@ class Fetch:
     USER_AGENT = "Puch/1.0 (Autonomous)"
 
     @classmethod
-    async def fetch_url(cls, url: str, user_agent: str, force_raw: bool = False) -> tuple[str, str]:
+    async def fetch_url(
+        cls, url: str, user_agent: str, force_raw: bool = False
+    ) -> tuple[str, str]:
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.get(
@@ -77,10 +87,19 @@ class Fetch:
                     timeout=30,
                 )
             except httpx.HTTPError as e:
-                raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Failed to fetch {url}: {e!r}"))
+                raise McpError(
+                    ErrorData(
+                        code=INTERNAL_ERROR, message=f"Failed to fetch {url}: {e!r}"
+                    )
+                )
 
             if response.status_code >= 400:
-                raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Failed to fetch {url} - status code {response.status_code}"))
+                raise McpError(
+                    ErrorData(
+                        code=INTERNAL_ERROR,
+                        message=f"Failed to fetch {url} - status code {response.status_code}",
+                    )
+                )
 
             page_raw = response.text
 
@@ -97,7 +116,9 @@ class Fetch:
 
     @staticmethod
     def extract_content_from_html(html: str) -> str:
-        ret = readabilipy.simple_json.simple_json_from_html_string(html, use_readability=True)
+        ret = readabilipy.simple_json.simple_json_from_html_string(
+            html, use_readability=True
+        )
         if not ret or not ret.get("content"):
             return "<error>Page failed to be simplified from HTML</error>"
         content = markdownify.markdownify(ret["content"], heading_style=markdownify.ATX)
@@ -140,25 +161,39 @@ JobFinderDescription = RichToolDescription(
     side_effects="Returns insights, fetched job descriptions, or relevant job links.",
 )
 
+
 @mcp.tool(description=JobFinderDescription.model_dump_json())
 async def job_finder(
     user_goal: Annotated[str, Field(description="The user's goal")],
-    job_description: Annotated[str | None, Field(description="Full job description text")] = None,
-    job_url: Annotated[AnyUrl | None, Field(description="A URL to fetch a job description from.")] = None,
+    job_description: Annotated[
+        str | None, Field(description="Full job description text")
+    ] = None,
+    job_url: Annotated[
+        AnyUrl | None, Field(description="A URL to fetch a job description from.")
+    ] = None,
     raw: Annotated[bool, Field(description="Return raw HTML content if True")] = False,
 ) -> str:
     if job_description:
         return f"📝 **Job Description Analysis**\n\n---\n{job_description.strip()}\n---\n\nUser Goal: **{user_goal}**"
 
     if job_url:
-        content, _ = await Fetch.fetch_url(str(job_url), Fetch.USER_AGENT, force_raw=raw)
+        content, _ = await Fetch.fetch_url(
+            str(job_url), Fetch.USER_AGENT, force_raw=raw
+        )
         return f"🔗 **Fetched Job Posting from URL**: {job_url}\n\n---\n{content.strip()}\n---"
 
     if "look for" in user_goal.lower() or "find" in user_goal.lower():
         links = await Fetch.Google_Search_links(user_goal)
-        return f"🔍 **Search Results for**: _{user_goal}_\n\n" + "\n".join(f"- {link}" for link in links)
+        return f"🔍 **Search Results for**: _{user_goal}_\n\n" + "\n".join(
+            f"- {link}" for link in links
+        )
 
-    raise McpError(ErrorData(code=INVALID_PARAMS, message="Provide job description, job URL, or search query."))
+    raise McpError(
+        ErrorData(
+            code=INVALID_PARAMS,
+            message="Provide job description, job URL, or search query.",
+        )
+    )
 
 
 # --- Tool: make_img_black_and_white ---
@@ -168,9 +203,12 @@ MAKE_IMG_BLACK_AND_WHITE_DESCRIPTION = RichToolDescription(
     side_effects="The image will be processed and saved in black and white format.",
 )
 
+
 @mcp.tool(description=MAKE_IMG_BLACK_AND_WHITE_DESCRIPTION.model_dump_json())
 async def make_img_black_and_white(
-    puch_image_data: Annotated[str, Field(description="Base64-encoded image data")] = None,
+    puch_image_data: Annotated[
+        str, Field(description="Base64-encoded image data")
+    ] = None,
 ) -> list[TextContent | ImageContent]:
     try:
         image_bytes = base64.b64decode(puch_image_data)
@@ -192,8 +230,10 @@ STOCK_PREDICTOR_DESCRIPTION = RichToolDescription(
     side_effects="Fetches market data from the article, analyzes it, and returns a detailed financial report for a specific NSE stock ticker.",
 )
 
+
 def pretty_print_message(message, indent=False):
     return message.pretty_repr(html=True)
+
 
 def extract_last_messages(update):
     if isinstance(update, tuple):
@@ -206,6 +246,7 @@ def extract_last_messages(update):
         results.extend([pretty_print_message(m) for m in messages[-1:]])
     return results
 
+
 async def run_stock_agent(query: str):
     client = MultiServerMCPClient(
         {
@@ -214,8 +255,8 @@ async def run_stock_agent(query: str):
                 "args": ["@brightdata/mcp"],
                 "env": {
                     "API_TOKEN": os.getenv("BRIGHT_DATA_API_TOKEN"),
-                    "WEB_UNLOCKER_ZONE": os.getenv("WEB_UNLOCKER_ZONE", "unblocker"),
-                    "BROWSER_ZONE": os.getenv("BROWSER_ZONE", "scraping_browser")
+                    "WEB_UNLOCKER_ZONE": "web_unlocker1",
+                    "BROWSER_ZONE": "scraping_browser",
                 },
                 "transport": "stdio",
             },
@@ -224,72 +265,52 @@ async def run_stock_agent(query: str):
 
     tools = await client.get_tools()
 
-    # Use Gemini instead of OpenAI
-    model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GEMINI_API_KEY)
+    stock_agent = create_react_agent(
+        llm,
+        tools,
+        prompt="""
+You are a **single integrated stock research assistant** specializing in the Indian Stock Market (NSE).
+Your task is to handle the **entire workflow** for the given query in ONE go, without asking for follow-up approval.
 
-    stock_finder_agent = create_react_agent(model, tools, prompt=""" You are a stock research analyst specializing in the Indian Stock Market (NSE). Your task is to select 2 promising, actively traided NSE-listed stocks for short term trading (buy/sell) based on recent performance, news buzz,volume or technical strength.
-    Avoid penny stocks and illiquid companies.
-    Output should include stock names, tickers, and brief reasoning for each choice.
-    Respond in structured plain text format.""", name = "stock_finder_agent")
+Steps to follow:
+1. **Stock Selection** – Pick 2 promising, actively traded NSE-listed stocks for short-term trading based on recent performance, news buzz, volume, or technical strength.
+   - Avoid penny stocks and illiquid companies.
+   - Output stock names & tickers.
 
-    market_data_agent = create_react_agent(model, tools, prompt="""You are a market data analyst for Indian stocks listed on NSE. Given a list of stock tickers (eg RELIANCE, INFY), your task is to gather recent market information for each stock, including:
-    - Current price
-    - Previous closing price
-    - Today's volume
-    - 7-day and 30-day price trend
-    - Basic Technical indicators (RSI, 50/200-day moving averages)
-    - Any notable spkies in volume or volatility
-    
-    Return your findings in a structured and readable format for each stock, suitable for further analysis by a recommendation engine. Use INR as the currency. Be concise but complete.""", name = "market_data_agent")
+2. **Market Data** – For each selected stock, gather:
+   - Current price (INR)
+   - Previous close
+   - Today's volume
+   - 7-day and 30-day price trends
+   - RSI, 50-day MA, 200-day MA
+   - Any notable spikes in volume or volatility
 
-    news_alanyst_agent = create_react_agent(model, tools, prompt="""You are a financial news analyst. Given the names or the tickers of Indian NSE listed stocks, your job is to-
-    - Search for the most recent news articles (past 3-5 days)
-    - Summarize key updates, announcements, and events for each stock
-    - Classify each piece of news as positive, negative or neutral
-    - Highlist how the news might affect short term stock price
-                                            
-    Present your response in a clear, structured format - one section per stock.
+3. **News Summary** – Search for the most recent news articles (past 3–5 days) about each stock:
+   - Summarize updates, announcements, and events
+   - Classify sentiment: Positive, Negative, or Neutral
+   - Highlight short-term price impact
 
-    Use bullet points where necessary. Keep it short, factual and analysis-oriented""", name = "news_analyst_agent")
+4. **Recommendation** – For each stock:
+   - Action: Buy, Sell, or Hold
+   - Target price (entry/exit) in INR
+   - Brief reason for recommendation
 
-    price_recommender_agent = create_react_agent(model, tools, prompt="""You are a trading stratefy advisor for the Indian Stock Market. You are given -
-    - Recent market data (current price, volume, trend, indicators)
-    - News summaries and sentiment for each stock
-        
-    Based on this info, for each stock-
-    1. Recommend an action : Buy, Sell or Hold
-    2. Suggest a specific target price for entry or exit (INR)
-    3. Briefly explain the reason behind your recommendation.
-        
-    Your goal is to provide practical. near-term trading advice for the next trading day.
-        
-    Keep the response concise and clearly structured.""", name = "price_recommender_agent")
-
-
-    supervisor = create_supervisor(
-        model=ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GEMINI_API_KEY),
-        agents=[stock_finder_agent, market_data_agent, news_alanyst_agent, price_recommender_agent],
-        prompt=(
-            "You are a supervisor managing four agents:\n"
-            "- a stock_finder_agent. Assign research-related tasks to this agent and pick 2 promising NSE stocks\n"
-            "- a market_data_agent. Assign tasks to fetch current market data (price, volume, trends)\n"
-            "- a news_alanyst_agent. Assign task to search and summarize recent news\n"
-            "- a price_recommender_agent. Assign task to give buy/sell decision with target price."
-            "Assign work to one agent at a time, do not call agents in parallel.\n"
-            "Do not do any work yourself."
-            "Make sure you complete till end and do not ask for proceed in between the task."
-        ),
-        add_handoff_back_messages=True,
-        output_mode="full_history",
-    ).compile()
-
+Format the final output in **clear structured plain text**:
+STOCK NAME (TICKER)
+- Market Data: ...
+- News: ...
+- Recommendation: ...
+""",
+        name="stock_agent",
+    )
 
     responses = []
-    for chunk in supervisor.stream({"messages": [{"role": "user", "content": query}]}):
+    for chunk in stock_agent.stream({"messages": [{"role": "user", "content": query}]}):
         last_msgs = extract_last_messages(chunk)
         responses.extend(last_msgs)
 
     return "\n\n".join(responses)
+
 
 @mcp.tool(description=STOCK_PREDICTOR_DESCRIPTION.model_dump_json())
 async def stock_recommendation(query: str) -> str:
@@ -300,6 +321,7 @@ async def stock_recommendation(query: str) -> str:
 async def main():
     print("🚀 Starting MCP server on http://0.0.0.0:8086")
     await mcp.run_async("streamable-http", host="0.0.0.0", port=8086)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
