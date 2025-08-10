@@ -258,6 +258,7 @@ def fetch_stock_news(stock_name, days=5):
         "sortBy": "publishedAt",
         "apiKey": os.getenv("NEWSAPI_KEY"),
         "language": "en",
+        "source" : "India, ind, Bharat, NSE, BSE"
     }
     resp = requests.get(url, params=params)
     if resp.status_code != 200:
@@ -277,6 +278,7 @@ def fetch_stock_news(stock_name, days=5):
 
 async def run_stock_agent(query: str):
     import json
+    from langchain.schema import SystemMessage, HumanMessage
 
     def build_company_extraction_user_prompt(q: str) -> str:
         hints = (
@@ -292,15 +294,17 @@ async def run_stock_agent(query: str):
         "Respond ONLY with this JSON (no extra text): "
         '{ "company": "<Company or NONE>", "reason": "<brief reason>" }'
     )
+
     try:
         extraction_messages = [
             SystemMessage(content=COMPANY_EXTRACTION_SYSTEM),
             HumanMessage(content=build_company_extraction_user_prompt(query)),
         ]
 
+        # Synchronous generate (can be converted to async if llm supports it)
         response = llm.generate([extraction_messages])
-
         content = response.generations[0][0].text.strip()
+
         data = json.loads(content)
         resolved = (data.get("company") or "").strip()
         reason = (data.get("reason") or "").strip()
@@ -310,6 +314,7 @@ async def run_stock_agent(query: str):
 
     target = resolved if resolved and resolved.upper() != "NONE" else "NSE"
 
+    # Fetch recent news
     articles = fetch_stock_news(target, days=5)
 
     def fmt(a):
@@ -329,7 +334,13 @@ async def run_stock_agent(query: str):
 You are a single integrated stock research assistant specializing in the Indian Stock Market (NSE).
 Handle the entire workflow in ONE go, without asking for follow-up approval.
 
-Use ONLY the provided recent news to infer near-term sentiment (Bullish/Bearish/Neutral).
+Primary task:
+- Use ONLY the provided recent news to infer near-term sentiment (Bullish/Bearish/Neutral) for the given stock.
+
+Additional task:
+- If the user query contains words like "buy", "recommend", "suggest", "best stocks", or "invest",
+  then also recommend 2-3 NSE-listed stocks with strong short-term prospects based on recent news trends.
+- Provide one short reason for each recommendation.
 
 Resolved target from user query: {target}
 Extraction note: {reason}
@@ -338,14 +349,18 @@ Recent News (last ~5 days) for: {target}
 {news_block}
 
 Tasks:
-- Classify the target's short-term sentiment as Bullish, Bearish, or Neutral based solely on the above news.
-- Keep outputs concise and structured.
+1. Classify the target's short-term sentiment as Bullish, Bearish, or Neutral based solely on the above news.
+2. If applicable, suggest 2-3 other NSE stocks to buy, with one-line reasons.
 
 Output format (plain text):
 TARGET: {target}
 SENTIMENT: <Bullish | Bearish | Neutral>
 CONFIDENCE: <0-1>
 REASON: <one short sentence referencing the news themes>
+RECOMMENDATIONS (if applicable):
+1. <Stock Name> - <reason>
+2. <Stock Name> - <reason>
+3. <Stock Name> - <reason>
 """,
         name="stock_agent",
     )
