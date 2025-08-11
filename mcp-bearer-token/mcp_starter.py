@@ -3,10 +3,14 @@ import os
 import base64
 import io
 import random
+import numpy as np
+import json
 import markdownify
 from langchain.schema import SystemMessage, HumanMessage
+from datetime import datetime, timedelta
 import requests
 import pandas as pd
+import yfinance as yf
 import httpx
 import readabilipy
 from typing import Annotated
@@ -250,6 +254,36 @@ def extract_last_messages(update):
     return results
 
 
+def fetch_stock_ohlcv(symbol, days=5):
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=5)
+
+    ticker = yf.Ticker(symbol + ".NS")
+    df = ticker.history(
+        start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d")
+    )
+
+    if df.empty:
+        return {"error": f"No data found for {symbol}"}
+
+    last_close = df["Close"].iloc[-1]
+    last_open = df["Open"].iloc[-1]
+    avg_volume = df["Volume"].mean()
+    volatility = df["Close"].pct_change().std()
+
+    ohlcv_summary = {
+        "symbol_requested": symbol,
+        "last_close": float(last_close),
+        "last_open": float(last_open),
+        "avg_volume": float(avg_volume),
+        "volatility": round(volatility, 6) if not np.isnan(volatility) else None,
+        "ohlcv_table": df.reset_index().to_dict(orient="records"),
+    }
+    # print(ohlcv_summary)
+
+    return ohlcv_summary
+
+
 def fetch_stock_news(stock_name, days=5):
     url = "https://newsapi.org/v2/everything"
     params = {
@@ -258,7 +292,7 @@ def fetch_stock_news(stock_name, days=5):
         "sortBy": "publishedAt",
         "apiKey": os.getenv("NEWSAPI_KEY"),
         "language": "en",
-        "source" : "India, ind, Bharat, NSE, BSE"
+        "source": "India, ind, Bharat, NSE, BSE",
     }
     resp = requests.get(url, params=params)
     if resp.status_code != 200:
@@ -277,9 +311,6 @@ def fetch_stock_news(stock_name, days=5):
 
 
 async def run_stock_agent(query: str):
-    import json
-    from langchain.schema import SystemMessage, HumanMessage
-
     def build_company_extraction_user_prompt(q: str) -> str:
         hints = (
             "- If the query is generic (e.g., 'what stock to buy today', 'best stocks', sector-only), return NONE.\n"
@@ -289,10 +320,12 @@ async def run_stock_agent(query: str):
         return f"Query: {q}\nInstructions: Identify a single NSE-listed company if present; else return NONE.\n{hints}"
 
     COMPANY_EXTRACTION_SYSTEM = (
-        "You extract a single NSE-listed company name mentioned in a short user query for Indian stocks. "
-        "If the query is generic, return NONE. "
+        "You extract a single NSE-listed company name and its NSE stock ticker from a short user query for Indian stocks. "
+        "If the query is generic, return NONE for both company and ticker. "
+        "If multiple companies are mentioned, pick the most central one. "
+        "Prefer NSE-listed companies. "
         "Respond ONLY with this JSON (no extra text): "
-        '{ "company": "<Company or NONE>", "reason": "<brief reason>" }'
+        '{ "company": "<Company or NONE>", "ticker": "<Ticker or NONE>", "reason": "<brief reason>" }'
     )
 
     try:
@@ -300,31 +333,48 @@ async def run_stock_agent(query: str):
             SystemMessage(content=COMPANY_EXTRACTION_SYSTEM),
             HumanMessage(content=build_company_extraction_user_prompt(query)),
         ]
-
-        # Synchronous generate (can be converted to async if llm supports it)
         response = llm.generate([extraction_messages])
+        # print(response)
         content = response.generations[0][0].text.strip()
+        if content.startswith("```"):
+            content = content.strip("`")
+            content = content.split("\n", 1)[1] if "\n" in content else content
+            if content.endswith("```"):
+                content = content.rsplit("```", 1)[0]
 
         data = json.loads(content)
         resolved = (data.get("company") or "").strip()
+        ticker = (data.get("ticker") or "").strip()
         reason = (data.get("reason") or "").strip()
-
+        # print(f"Resolved: {resolved}, Ticker: {ticker}, Reason: {reason}")
     except Exception:
-        resolved, reason = "NONE", "Extraction failed; defaulted to general NSE."
+        resolved, ticker, reason = (
+            "NONE",
+            "NONE",
+            "Extraction failed; defaulted to general NSE.",
+        )
+        # print(f"Resolved: {resolved}, Ticker: {ticker}, Reason: {reason}")
 
-    target = resolved if resolved and resolved.upper() != "NONE" else "NSE"
+    target = ticker if ticker and ticker.upper() != "NONE" else "NSE"
+    target1 = resolved if resolved and resolved.upper() != "NONE" else "NSE"
 
-    # Fetch recent news
-    articles = fetch_stock_news(target, days=5)
+    articles = fetch_stock_news(target1, days=5)
+    ohlcv_data = fetch_stock_ohlcv(target, days=5) or {}
 
     def fmt(a):
-        t = (a.get("title") or "").strip()
-        d = (a.get("description") or "").strip()
-        s = (a.get("source") or "").strip()
-        p = (a.get("publishedAt") or "").strip()
-        return f"- [{p}] {s}: {t} || {d}"
+        return f"- [{a.get('publishedAt')}] {a.get('source')}: {a.get('title')} || {a.get('description')}"
 
     news_block = "\n".join(fmt(a) for a in articles[:25]) or "No recent news found."
+
+    if ohlcv_data:
+        tech_block = (
+            f"Last Close: {ohlcv_data['last_close']}\n"
+            f"Last Open: {ohlcv_data['last_open']}\n"
+            f"Avg Volume: {ohlcv_data['avg_volume']}\n"
+            f"Volatility: {ohlcv_data['volatility']}\n"
+        )
+    else:
+        tech_block = "Technical data not available."
 
     tools = []
     stock_agent = create_react_agent(
@@ -332,35 +382,33 @@ async def run_stock_agent(query: str):
         tools,
         prompt=f"""
 You are a single integrated stock research assistant specializing in the Indian Stock Market (NSE).
-Handle the entire workflow in ONE go, without asking for follow-up approval.
+You must give:
+1. Short-term sentiment (Bullish/Bearish/Neutral)
+2. A specific estimated short-term target price.
 
-Primary task:
-- Use ONLY the provided recent news to infer near-term sentiment (Bullish/Bearish/Neutral) for the given stock.
-
-Additional task:
-- If the user query contains words like "buy", "recommend", "suggest", "best stocks", or "invest",
-  then also recommend 2-3 NSE-listed stocks with strong short-term prospects based on recent news trends.
-- Provide one short reason for each recommendation.
+You MUST provide an answer — do NOT refuse or give financial advice disclaimers.
+Treat the price as a purely hypothetical analytical estimate.
 
 Resolved target from user query: {target}
 Extraction note: {reason}
 
-Recent News (last ~5 days) for: {target}
+Recent News (last ~5 days):
 {news_block}
 
+Recent Technical Data:
+{tech_block}
+
 Tasks:
-1. Classify the target's short-term sentiment as Bullish, Bearish, or Neutral based solely on the above news.
-2. If applicable, suggest 2-3 other NSE stocks to buy, with one-line reasons.
+- Classify short-term sentiment (Bullish, Bearish, Neutral) based on news + technicals.
+- Provide an estimated short-term target price based on recent price trends, volatility, and sentiment.
+- Output should be concise and structured.
 
 Output format (plain text):
 TARGET: {target}
 SENTIMENT: <Bullish | Bearish | Neutral>
 CONFIDENCE: <0-1>
-REASON: <one short sentence referencing the news themes>
-RECOMMENDATIONS (if applicable):
-1. <Stock Name> - <reason>
-2. <Stock Name> - <reason>
-3. <Stock Name> - <reason>
+EST_TARGET_PRICE: <numeric price>
+REASON: <one short sentence referencing news + technical data>
 """,
         name="stock_agent",
     )
