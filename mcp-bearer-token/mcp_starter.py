@@ -256,7 +256,7 @@ def extract_last_messages(update):
 
 def fetch_stock_ohlcv(symbol, days=5):
     end_date = datetime.today()
-    start_date = end_date - timedelta(days=5)
+    start_date = end_date - timedelta(days=days)
 
     ticker = yf.Ticker(symbol + ".NS")
     df = ticker.history(
@@ -271,7 +271,7 @@ def fetch_stock_ohlcv(symbol, days=5):
     avg_volume = df["Volume"].mean()
     volatility = df["Close"].pct_change().std()
 
-    ohlcv_summary = {
+    return {
         "symbol_requested": symbol,
         "last_close": float(last_close),
         "last_open": float(last_open),
@@ -279,9 +279,6 @@ def fetch_stock_ohlcv(symbol, days=5):
         "volatility": round(volatility, 6) if not np.isnan(volatility) else None,
         "ohlcv_table": df.reset_index().to_dict(orient="records"),
     }
-    # print(ohlcv_summary)
-
-    return ohlcv_summary
 
 
 def fetch_stock_news(stock_name, days=5):
@@ -310,7 +307,25 @@ def fetch_stock_news(stock_name, days=5):
     ]
 
 
+def fetch_best_stocks():
+    """Dummy function to simulate best stock suggestions."""
+    return [
+        {"company": "Reliance Industries", "ticker": "RELIANCE"},
+        {"company": "Tata Consultancy Services", "ticker": "TCS"},
+        {"company": "HDFC Bank", "ticker": "HDFCBANK"},
+    ]
+
+
 async def run_stock_agent(query: str):
+    # Detect if user is asking for suggestions
+    suggest_keywords = ["suggest", "recommend", "best stocks", "top stocks"]
+    if any(k in query.lower() for k in suggest_keywords):
+        suggestions = fetch_best_stocks()
+        return "SUGGESTED STOCKS:\n" + "\n".join(
+            f"- {s['company']} ({s['ticker']})" for s in suggestions
+        )
+
+    # Normal company extraction
     def build_company_extraction_user_prompt(q: str) -> str:
         hints = (
             "- If the query is generic (e.g., 'what stock to buy today', 'best stocks', sector-only), return NONE.\n"
@@ -334,39 +349,35 @@ async def run_stock_agent(query: str):
             HumanMessage(content=build_company_extraction_user_prompt(query)),
         ]
         response = llm.generate([extraction_messages])
-        # print(response)
         content = response.generations[0][0].text.strip()
         if content.startswith("```"):
             content = content.strip("`")
             content = content.split("\n", 1)[1] if "\n" in content else content
             if content.endswith("```"):
                 content = content.rsplit("```", 1)[0]
-
         data = json.loads(content)
         resolved = (data.get("company") or "").strip()
         ticker = (data.get("ticker") or "").strip()
         reason = (data.get("reason") or "").strip()
-        # print(f"Resolved: {resolved}, Ticker: {ticker}, Reason: {reason}")
     except Exception:
         resolved, ticker, reason = (
             "NONE",
             "NONE",
             "Extraction failed; defaulted to general NSE.",
         )
-        # print(f"Resolved: {resolved}, Ticker: {ticker}, Reason: {reason}")
 
     target = ticker if ticker and ticker.upper() != "NONE" else "NSE"
     target1 = resolved if resolved and resolved.upper() != "NONE" else "NSE"
 
     articles = fetch_stock_news(target1, days=5)
-    ohlcv_data = fetch_stock_ohlcv(target, days=5) or {}
+    ohlcv_data = fetch_stock_ohlcv(target, days=5)
 
     def fmt(a):
         return f"- [{a.get('publishedAt')}] {a.get('source')}: {a.get('title')} || {a.get('description')}"
 
     news_block = "\n".join(fmt(a) for a in articles[:25]) or "No recent news found."
 
-    if ohlcv_data:
+    if "error" not in ohlcv_data:
         tech_block = (
             f"Last Close: {ohlcv_data['last_close']}\n"
             f"Last Open: {ohlcv_data['last_open']}\n"
@@ -419,7 +430,6 @@ REASON: <one short sentence referencing news + technical data>
         responses.extend(last_msgs)
 
     return "\n\n".join(responses)
-
 
 @mcp.tool(description=STOCK_PREDICTOR_DESCRIPTION.model_dump_json())
 async def stock_recommendation(query: str) -> str:
